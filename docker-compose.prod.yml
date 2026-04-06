@@ -1,0 +1,98 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  postgres_replica:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    command: |
+      -c hot_standby=on
+      -c primary_conninfo=host=postgres port=5432 user=replica password=replica_pass
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  redis_cache:
+    image: redis:7-alpine
+    command: redis-server --port 6380
+    restart: unless-stopped
+
+  clamav:
+    image: clamav/clamav:latest
+    environment:
+      CLAMAV_NO_FRESHCLAM: "false"
+    ports:
+      - "3310:3310"
+    restart: unless-stopped
+
+  celery_worker:
+    build: .
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 --autoscale=10,2
+    depends_on:
+      - redis
+      - postgres
+      - clamav
+    env_file:
+      - .env
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+
+  celery_beat:
+    build: .
+    command: celery -A app.celery_app beat --loglevel=info
+    depends_on:
+      - redis
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  web:
+    build: .
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --ssl-keyfile=/certs/privkey.pem --ssl-certfile=/certs/fullchain.pem --workers 4
+    ports:
+      - "443:8000"
+    depends_on:
+      - postgres
+      - redis
+      - redis_cache
+      - clamav
+    env_file:
+      - .env
+    volumes:
+      - ./certs:/certs:ro
+      - ./:/app
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
